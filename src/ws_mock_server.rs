@@ -367,17 +367,29 @@ impl WsMockServer {
         Self::spawn_forwarding_tasks(state.clone(), mpsc_send.clone()).await;
 
         {
+            // TODO: refactor and possible rename broad_recv to close
             let state_guard = state.read().await;
             let broad_recv = state_guard.close_sender.subscribe();
 
             tokio::spawn(Self::outbound_message_task(send, mpsc_recv, broad_recv));
         }
 
-        while let Some(Ok(msg)) = recv.next().await {
-            let text = msg.to_text().expect("Message was not text").to_string();
-            debug!("Received: '{:?}'", text);
+        // XXX: the problem here is that only sending part of socket is closed
+        // XXX: we have to close receiving part as well
+        let mut close = state.read().await.close_sender.subscribe();
+        loop {
+            select! {
+            Some(Ok(msg)) = recv.next() => {
+                let text = msg.to_text().expect("Message was not text").to_string();
+                debug!("Received: '{:?}'", text);
 
-            Self::match_mocks(state.clone(), mpsc_send.clone(), text.as_str()).await;
+                Self::match_mocks(state.clone(), mpsc_send.clone(), text.as_str()).await;
+            },
+            Ok(_) = close.recv() => {
+                debug!("Closing connection");
+                break;
+            },
+            }
         }
     }
 
@@ -474,6 +486,7 @@ impl WsMockServer {
 
     /// Shutdown the server and all associated tasks.
     pub async fn shutdown(&mut self) {
+        println!("Shutting down server");
         let state_guard = self.state.read().await;
         // ignore outcome, since failure means receivers dropped anyway
         _ = state_guard.close_sender.send(());
@@ -617,6 +630,12 @@ mod tests {
 
         server.verify().await;
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_shutdown_closing_connection() {
+        // TODO
     }
 
     #[should_panic(expected = "Expected 2 matching calls, but received 1\nCalled With:\n\t{}")]
